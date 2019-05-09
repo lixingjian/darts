@@ -41,6 +41,8 @@ parser.add_argument('--train_portion', type=float, default=0.5, help='portion of
 parser.add_argument('--unrolled', action='store_true', default=False, help='use one-step unrolled validation loss')
 parser.add_argument('--arch_learning_rate', type=float, default=3e-4, help='learning rate for arch encoding')
 parser.add_argument('--arch_weight_decay', type=float, default=1e-3, help='weight decay for arch encoding')
+parser.add_argument('--residual_wei', type=float, default=2, help='weight decay for arch encoding')
+parser.add_argument('--shrink_channel', action='store_true', default=False, help='weight decay for arch encoding')
 args = parser.parse_args()
 
 args.save = 'search-{}-{}'.format(args.save, time.strftime("%Y%m%d-%H%M%S"))
@@ -121,8 +123,9 @@ def main():
     logging.info('train_acc %f', train_acc)
 
     # validation
-    valid_acc, valid_obj = infer(valid_queue, model, criterion)
-    logging.info('valid_acc %f', valid_acc)
+    if epoch == args.epochs - 1:
+      valid_acc, valid_obj = infer(valid_queue, model, criterion)
+      logging.info('valid_acc %f', valid_acc)
 
     utils.save(model, os.path.join(args.save, 'weights.pt'))
 
@@ -155,9 +158,14 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
     optimizer.step()
 
     prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-    objs.update(loss.data[0], n)
-    top1.update(prec1.data[0], n)
-    top5.update(prec5.data[0], n)
+    if int(torch.__version__[0]) > 0:
+        objs.update(loss.item(), n)
+        top1.update(prec1.item(), n)
+        top5.update(prec5.item(), n)
+    else:
+        objs.update(loss.data[0], n)
+        top1.update(prec1.data[0], n)
+        top5.update(prec5.data[0], n)
 
     if step % args.report_freq == 0:
       logging.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
@@ -180,9 +188,14 @@ def infer(valid_queue, model, criterion):
 
     prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
     n = input.size(0)
-    objs.update(loss.data[0], n)
-    top1.update(prec1.data[0], n)
-    top5.update(prec5.data[0], n)
+    if int(torch.__version__[0]) > 0:
+        objs.update(loss.item(), n)
+        top1.update(prec1.item(), n)
+        top5.update(prec5.item(), n)
+    else:
+        objs.update(loss.data[0], n)
+        top1.update(prec1.data[0], n)
+        top5.update(prec5.data[0], n)
 
     if step % args.report_freq == 0:
       logging.info('valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)

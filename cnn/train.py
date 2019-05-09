@@ -38,6 +38,8 @@ parser.add_argument('--save', type=str, default='EXP', help='experiment name')
 parser.add_argument('--seed', type=int, default=0, help='random seed')
 parser.add_argument('--arch', type=str, default='DARTS', help='which architecture to use')
 parser.add_argument('--grad_clip', type=float, default=5, help='gradient clipping')
+parser.add_argument('--residual_wei', type=float, default=2, help='weight decay for arch encoding')
+parser.add_argument('--shrink_channel', action='store_true', default=False, help='weight decay for arch encoding')
 args = parser.parse_args()
 
 args.save = 'eval-{}-{}'.format(args.save, time.strftime("%Y%m%d-%H%M%S"))
@@ -102,8 +104,9 @@ def main():
     train_acc, train_obj = train(train_queue, model, criterion, optimizer)
     logging.info('train_acc %f', train_acc)
 
-    valid_acc, valid_obj = infer(valid_queue, model, criterion)
-    logging.info('valid_acc %f', valid_acc)
+    if epoch == args.epochs - 1:
+        valid_acc, valid_obj = infer(valid_queue, model, criterion)
+        logging.info('valid_acc %f', valid_acc)
 
     utils.save(model, os.path.join(args.save, 'weights.pt'))
 
@@ -130,9 +133,14 @@ def train(train_queue, model, criterion, optimizer):
 
     prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
     n = input.size(0)
-    objs.update(loss.data[0], n)
-    top1.update(prec1.data[0], n)
-    top5.update(prec5.data[0], n)
+    if int(torch.__version__[0]) > 0:
+        objs.update(loss.item(), n)
+        top1.update(prec1.item(), n)
+        top5.update(prec5.item(), n)
+    else:
+        objs.update(loss.data[0], n)
+        top1.update(prec1.data[0], n)
+        top5.update(prec5.data[0], n)
 
     if step % args.report_freq == 0:
       logging.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
@@ -155,9 +163,14 @@ def infer(valid_queue, model, criterion):
 
     prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
     n = input.size(0)
-    objs.update(loss.data[0], n)
-    top1.update(prec1.data[0], n)
-    top5.update(prec5.data[0], n)
+    if int(torch.__version__[0]) > 0:
+        objs.update(loss.item(), n)
+        top1.update(prec1.item(), n)
+        top5.update(prec5.item(), n)
+    else:
+        objs.update(loss.data[0], n)
+        top1.update(prec1.data[0], n)
+        top5.update(prec5.data[0], n)
 
     if step % args.report_freq == 0:
       logging.info('valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)

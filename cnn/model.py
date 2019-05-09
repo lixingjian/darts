@@ -7,9 +7,14 @@ from utils import drop_path
 
 class Cell(nn.Module):
 
-  def __init__(self, genotype, C_prev_prev, C_prev, C, reduction, reduction_prev):
+  def __init__(self, genotype, C_prev_prev, C_prev, C, reduction, reduction_prev, residual_wei, shrink_channel):
     super(Cell, self).__init__()
-    print(C_prev_prev, C_prev, C)
+    self.reduction = reduction
+    self.reduction_prev = reduction_prev
+    self.residual_wei = residual_wei
+    self.shrink_channel = shrink_channel
+    self.residual_reduce = FactorizedReduce(C_prev_prev, C * 4)
+    self.residual_norm = nn.ReLU()
 
     if reduction_prev:
       self.preprocess0 = FactorizedReduce(C_prev_prev, C)
@@ -38,11 +43,11 @@ class Cell(nn.Module):
       self._ops += [op]
     self._indices = indices
 
-  def forward(self, s0, s1, drop_prob):
-    s0 = self.preprocess0(s0)
-    s1 = self.preprocess1(s1)
+  def forward(self, s0, s1, drop_prob, residual_wei = 2):
+    s0p = self.preprocess0(s0)
+    s1p = self.preprocess1(s1)
 
-    states = [s0, s1]
+    states = [s0p, s1p]
     for i in range(self._steps):
       h1 = states[self._indices[2*i]]
       h2 = states[self._indices[2*i+1]]
@@ -57,8 +62,29 @@ class Cell(nn.Module):
           h2 = drop_path(h2, drop_prob)
       s = h1 + h2
       states += [s]
-    return torch.cat([states[i] for i in self._concat], dim=1)
+    
+    if self.shrink_channel:
+        out = None
+        for s in states[-self._concat:]:
+            if out is None:
+                out = s
+            else:
+                out = out + s
+    else:
+        out =  torch.cat([states[i] for i in self._concat], dim=1)
 
+    if self.reduction:
+        out = out + self.residual_wei * self.residual_reduce(s0)
+        out = out + self.residual_wei * self.residual_reduce(s1)
+    elif self.reduction_prev:
+        out = out + self.residual_wei * self.residual_reduce(s0)
+        out = out + self.residual_wei * self.residual_norm(s1)
+    else:
+        out = out + self.residual_wei * self.residual_norm(s0)
+        out = out + self.residual_wei * self.residual_norm(s1)
+    
+    #return torch.cat([states[i] for i in self._concat], dim=1)
+    return out
 
 class AuxiliaryHeadCIFAR(nn.Module):
 
@@ -110,12 +136,12 @@ class AuxiliaryHeadImageNet(nn.Module):
 
 class NetworkCIFAR(nn.Module):
 
-  def __init__(self, C, num_classes, layers, auxiliary, genotype):
+  def __init__(self, C, num_classes, layers, auxiliary, genotype, residual_wei=2, shrink_channel=False):
     super(NetworkCIFAR, self).__init__()
     self._layers = layers
     self._auxiliary = auxiliary
 
-    stem_multiplier = 3
+    stem_multiplier = 4
     C_curr = stem_multiplier*C
     self.stem = nn.Sequential(
       nn.Conv2d(3, C_curr, 3, padding=1, bias=False),
@@ -131,7 +157,7 @@ class NetworkCIFAR(nn.Module):
         reduction = True
       else:
         reduction = False
-      cell = Cell(genotype, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
+      cell = Cell(genotype, C_prev_prev, C_prev, C_curr, reduction, reduction_prev, residual_wei, shrink_channel)
       reduction_prev = reduction
       self.cells += [cell]
       C_prev_prev, C_prev = C_prev, cell.multiplier*C_curr

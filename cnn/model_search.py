@@ -24,9 +24,14 @@ class MixedOp(nn.Module):
 
 class Cell(nn.Module):
 
-  def __init__(self, steps, multiplier, C_prev_prev, C_prev, C, reduction, reduction_prev):
+  def __init__(self, steps, multiplier, C_prev_prev, C_prev, C, reduction, reduction_prev, residual_wei, shrink_channel):
     super(Cell, self).__init__()
     self.reduction = reduction
+    self.reduction_prev = reduction_prev
+    self.residual_wei = residual_wei
+    self.shrink_channel = shrink_channel
+    self.residual_reduce = FactorizedReduce(C_prev_prev, C * multiplier)
+    self.residual_norm = nn.ReLU()
 
     if reduction_prev:
       self.preprocess0 = FactorizedReduce(C_prev_prev, C, affine=False)
@@ -45,22 +50,39 @@ class Cell(nn.Module):
         self._ops.append(op)
 
   def forward(self, s0, s1, weights):
-    s0 = self.preprocess0(s0)
-    s1 = self.preprocess1(s1)
-
-    states = [s0, s1]
+    s0p = self.preprocess0(s0)
+    s1p = self.preprocess1(s1)
+    states = [s0p, s1p]
     offset = 0
     for i in range(self._steps):
       s = sum(self._ops[offset+j](h, weights[offset+j]) for j, h in enumerate(states))
       offset += len(states)
       states.append(s)
 
-    return torch.cat(states[-self._multiplier:], dim=1)
+    if self.shrink_channel:
+        out = None
+        for s in states[-self._multiplier:]:
+            if out is None:
+                out = s
+            else:
+                out = out + s
+    else:
+        out = torch.cat(states[-self._multiplier:], dim=1)
 
+    if self.reduction:
+        out = out + self.residual_wei * self.residual_reduce(s0)
+        out = out + self.residual_wei * self.residual_reduce(s1)
+    elif self.reduction_prev:
+        out = out + self.residual_wei * self.residual_reduce(s0)
+        out = out + self.residual_wei * self.residual_norm(s1)
+    else:
+        out = out + self.residual_wei * self.residual_norm(s0)
+        out = out + self.residual_wei * self.residual_norm(s1)
+    return out
 
 class Network(nn.Module):
 
-  def __init__(self, C, num_classes, layers, criterion, steps=4, multiplier=4, stem_multiplier=3):
+  def __init__(self, C, num_classes, layers, criterion, steps=4, multiplier=4, stem_multiplier=4, residual_wei=2, shrink_channel=False):
     super(Network, self).__init__()
     self._C = C
     self._num_classes = num_classes
@@ -84,10 +106,11 @@ class Network(nn.Module):
         reduction = True
       else:
         reduction = False
-      cell = Cell(steps, multiplier, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
+      cell = Cell(steps, multiplier, C_prev_prev, C_prev, C_curr, reduction, reduction_prev, residual_wei, shrink_channel)
       reduction_prev = reduction
       self.cells += [cell]
-      C_prev_prev, C_prev = C_prev, multiplier*C_curr
+      C_prev_prev = C_prev
+      C_prev = C_curr if shrink_channel else multiplier*C_curr
 
     self.global_pooling = nn.AdaptiveAvgPool2d(1)
     self.classifier = nn.Linear(C_prev, num_classes)
