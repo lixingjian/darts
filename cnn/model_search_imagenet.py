@@ -71,14 +71,33 @@ class Cell(nn.Module):
                 out = out + s
     else:
         out = torch.cat(states[-self._multiplier:], dim=1)
+    
+    '''
+    print('shape info')
+    print('output', out.shape)
+    print('origin', s0.shape, s1.shape)
+    print('preproc', s0p.shape, s1p.shape)
+    print('normal', self.residual_norm(s0).shape, self.residual_norm(s1).shape)
+    if self.reduction:
+        print('reduce all', self.residual_reduce(s0).shape, self.residual_reduce(s1).shape)
+    elif self.reduction_prev:
+        print('reduce s0', self.residual_reduce(s0).shape)
+    print('end')
+    '''
 
     if self.reduction:
         out = out + self.residual_wei * self.residual_reduce(s0)
         out = out + self.residual_wei * self.residual_reduce(s1)
     elif self.reduction_prev:
+        if s1.shape[1] < out.shape[1]:
+            s1 = s1.repeat(1, out.shape[1] // s1.shape[1], 1, 1)
         out = out + self.residual_wei * self.residual_reduce(s0)
         out = out + self.residual_wei * self.residual_norm(s1)
     else:
+        if s0.shape[1] < out.shape[1]:
+            s0 = s0.repeat(1, out.shape[1] // s0.shape[1], 1, 1)
+        if s1.shape[1] < out.shape[1]:
+            s1 = s1.repeat(1, out.shape[1] // s1.shape[1], 1, 1)
         out = out + self.residual_wei * self.residual_norm(s0)
         out = out + self.residual_wei * self.residual_norm(s1)
     return out
@@ -96,6 +115,7 @@ class Network(nn.Module):
     self.residual_wei = residual_wei
     self.shrink_channel = shrink_channel
 
+    '''
     C_curr = stem_multiplier*C
     self.stem = nn.Sequential(
       nn.Conv2d(3, C_curr, 3, padding=1, bias=False),
@@ -103,6 +123,23 @@ class Network(nn.Module):
     )
  
     C_prev_prev, C_prev, C_curr = C_curr, C_curr, C
+    '''
+
+    self.stem0 = nn.Sequential(
+      nn.Conv2d(3, C // 2, kernel_size=3, stride=2, padding=1, bias=False),
+      nn.BatchNorm2d(C // 2), 
+      nn.ReLU(inplace=True),
+      nn.Conv2d(C // 2, C, 3, stride=2, padding=1, bias=False),
+      nn.BatchNorm2d(C),
+    )   
+
+    self.stem1 = nn.Sequential(
+      nn.ReLU(inplace=True),
+      nn.Conv2d(C, C, 3, stride=1, padding=1, bias=False),
+      nn.BatchNorm2d(C),
+    ) 
+    C_prev_prev, C_prev, C_curr = C, C, C
+
     self.cells = nn.ModuleList()
     reduction_prev = False
     for i in range(layers):
@@ -129,7 +166,9 @@ class Network(nn.Module):
     return model_new
 
   def forward(self, input):
-    s0 = s1 = self.stem(input)
+    #s0 = s1 = self.stem(input)
+    s0 = self.stem0(input)
+    s1 = self.stem1(s0)
     for i, cell in enumerate(self.cells):
       if cell.reduction:
         weights = F.softmax(self.alphas_reduce, dim=-1)

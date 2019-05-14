@@ -1,10 +1,51 @@
 import os
+import math
 import numpy as np
 import torch
 import shutil
 import torchvision.transforms as transforms
 from torch.autograd import Variable
+import torch.nn as nn
 
+class AverageMeterTime(object):
+    """Computes and stores the average and current value"""
+    def __init__(self, name, fmt=':f'):
+        self.name = name
+        self.fmt = fmt
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+    def __str__(self):
+        fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
+        return fmtstr.format(**self.__dict__)
+
+
+class ProgressMeter(object):
+    def __init__(self, num_batches, *meters, prefix=""):
+        self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
+        self.meters = meters
+        self.prefix = prefix
+
+    def print(self, batch):
+        entries = [self.prefix + self.batch_fmtstr.format(batch)]
+        entries += [str(meter) for meter in self.meters]
+        print('\t'.join(entries))
+
+    def _get_batch_fmtstr(self, num_batches):
+        num_digits = len(str(num_batches // 1))
+        fmt = '{:' + str(num_digits) + 'd}'
+        return '[' + fmt + '/' + fmt.format(num_batches) + ']'
 
 class AvgrageMeter(object):
 
@@ -82,6 +123,53 @@ def _data_transforms_cifar10(args):
 def count_parameters_in_MB(model):
   return np.sum(np.prod(v.size()) for name, v in model.named_parameters() if "auxiliary" not in name)/1e6
 
+def set_lr(optimizer, T_cur, T_total, lr_init):
+  lr_adj = 0.5 * lr_init * (1 + math.cos(math.pi * T_cur / T_total)) 
+  for param_group in optimizer.param_groups:
+    param_group['lr'] = lr_adj
+  return lr_adj
+
+def set_group_weight(module, bn_no_wd=True, bias_no_wd=True):
+  if not (bn_no_wd or bias_no_wd):
+    return module.parameters()
+
+  group_decay = []
+  group_no_decay = []
+  
+  for m in module.modules():
+    if isinstance(m, nn.Linear):
+      group_decay.append(m.weight)
+      if bias_no_wd and (m.bias is not None):
+        group_no_decay.append(m.bias)
+      else:
+        group_decay.append(m.bias)
+    elif isinstance(m, nn.Conv2d):
+      group_decay.append(m.weight)
+      if bias_no_wd and (m.bias is not None):
+        group_no_decay.append(m.bias)
+      else:
+        group_decay.append(m.bias)
+    elif isinstance(m, nn.BatchNorm2d):
+      if m.bias is not None:
+        if bn_no_wd:
+          group_no_decay.append(m.weight)
+        else:
+          group_decay.append(m.weight)
+      if m.bias is not None:
+        if bn_no_wd:
+          group_no_decay.append(m.bias)
+        else:
+          group_decay.append(m.bias)
+    else:
+      for w in m.parameters():
+        group_decay.append(w)
+  group_decay = list(set(module.parameters()) - set(group_no_decay))
+  print('decay params: %d' % len(group_decay))
+  print('no decay params: %d' % len(group_no_decay))
+  print('all params: %d' % len(list(module.parameters())))
+  assert len(list(module.parameters())) == len(group_decay) + len(group_no_decay)
+  groups = [dict(params=group_decay), dict(params=group_no_decay, weight_decay=.0)]
+  return groups
 
 def save_checkpoint(state, is_best, save):
   filename = os.path.join(save, 'checkpoint.pth.tar')
@@ -96,8 +184,13 @@ def save(model, model_path):
 
 
 def load(model, model_path):
-  model.load_state_dict(torch.load(model_path))
-
+  d = {}
+  for k, v in torch.load(model_path).items():
+    if k.startswith('module.'):
+      d[k[len('module.'):]] = v
+    else:
+      d[k] = v
+  model.load_state_dict(d)
 
 def drop_path(x, drop_prob):
   if drop_prob > 0.:
@@ -114,7 +207,8 @@ def create_exp_dir(path, scripts_to_save=None):
   print('Experiment dir : {}'.format(path))
 
   if scripts_to_save is not None:
-    os.mkdir(os.path.join(path, 'scripts'))
+    if not os.path.exists(os.path.join(path, 'scripts')):
+      os.mkdir(os.path.join(path, 'scripts'))
     for script in scripts_to_save:
       dst_file = os.path.join(path, 'scripts', os.path.basename(script))
       shutil.copyfile(script, dst_file)

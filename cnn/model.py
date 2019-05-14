@@ -13,7 +13,10 @@ class Cell(nn.Module):
     self.reduction_prev = reduction_prev
     self.residual_wei = residual_wei
     self.shrink_channel = shrink_channel
-    self.residual_reduce = FactorizedReduce(C_prev_prev, C * 4)
+    if reduction:
+        self.residual_reduce = FactorizedReduce(C_prev, C * 4)
+    elif reduction_prev:
+        self.residual_reduce = FactorizedReduce(C_prev_prev, C * 4)
     self.residual_norm = nn.ReLU()
 
     if reduction_prev:
@@ -43,7 +46,7 @@ class Cell(nn.Module):
       self._ops += [op]
     self._indices = indices
 
-  def forward(self, s0, s1, drop_prob, residual_wei = 2):
+  def forward(self, s0, s1, drop_prob):
     s0p = self.preprocess0(s0)
     s1p = self.preprocess1(s1)
 
@@ -65,7 +68,7 @@ class Cell(nn.Module):
     
     if self.shrink_channel:
         out = None
-        for s in states[-self._concat:]:
+        for s in states[-len(self._concat):]:
             if out is None:
                 out = s
             else:
@@ -73,13 +76,30 @@ class Cell(nn.Module):
     else:
         out =  torch.cat([states[i] for i in self._concat], dim=1)
 
+    '''
+    print('shape info')
+    print('output', out.shape)
+    print('origin', s0.shape, s1.shape)
+    print('preproc', s0p.shape, s1p.shape)
+    print('normal', self.residual_norm(s0).shape, self.residual_norm(s1).shape)
+    if self.reduction:
+        print('reduce all', self.residual_reduce(s0).shape, self.residual_reduce(s1).shape)
+    elif self.reduction_prev:
+        print('reduce s0', self.residual_reduce(s0).shape)
+    print('end')
+    '''
+
     if self.reduction:
         out = out + self.residual_wei * self.residual_reduce(s0)
         out = out + self.residual_wei * self.residual_reduce(s1)
     elif self.reduction_prev:
+        if s1.shape[1] < out.shape[1]:
+            s1 = s1.repeat(1, out.shape[1] // s1.shape[1], 1, 1)
         out = out + self.residual_wei * self.residual_reduce(s0)
         out = out + self.residual_wei * self.residual_norm(s1)
     else:
+        if s0.shape[1] < out.shape[1]:
+            s0 = s0.repeat(1, out.shape[1] // s0.shape[1], 1, 1)
         out = out + self.residual_wei * self.residual_norm(s0)
         out = out + self.residual_wei * self.residual_norm(s1)
     
@@ -136,7 +156,7 @@ class AuxiliaryHeadImageNet(nn.Module):
 
 class NetworkCIFAR(nn.Module):
 
-  def __init__(self, C, num_classes, layers, auxiliary, genotype, residual_wei=2, shrink_channel=False):
+  def __init__(self, C, num_classes, layers, auxiliary, genotype, residual_wei, shrink_channel):
     super(NetworkCIFAR, self).__init__()
     self._layers = layers
     self._auxiliary = auxiliary
@@ -184,7 +204,7 @@ class NetworkCIFAR(nn.Module):
 
 class NetworkImageNet(nn.Module):
 
-  def __init__(self, C, num_classes, layers, auxiliary, genotype):
+  def __init__(self, C, num_classes, layers, auxiliary, genotype, residual_wei, shrink_channel):
     super(NetworkImageNet, self).__init__()
     self._layers = layers
     self._auxiliary = auxiliary
@@ -213,7 +233,8 @@ class NetworkImageNet(nn.Module):
         reduction = True
       else:
         reduction = False
-      cell = Cell(genotype, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
+      #print(C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
+      cell = Cell(genotype, C_prev_prev, C_prev, C_curr, reduction, reduction_prev, residual_wei, shrink_channel)
       reduction_prev = reduction
       self.cells += [cell]
       C_prev_prev, C_prev = C_prev, cell.multiplier * C_curr
@@ -222,7 +243,8 @@ class NetworkImageNet(nn.Module):
 
     if auxiliary:
       self.auxiliary_head = AuxiliaryHeadImageNet(C_to_auxiliary, num_classes)
-    self.global_pooling = nn.AvgPool2d(7)
+    #self.global_pooling = nn.AvgPool2d(7)
+    self.global_pooling = nn.AdaptiveAvgPool2d(1) 
     self.classifier = nn.Linear(C_prev, num_classes)
 
   def forward(self, input):

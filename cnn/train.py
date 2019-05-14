@@ -26,6 +26,7 @@ parser.add_argument('--weight_decay', type=float, default=3e-4, help='weight dec
 parser.add_argument('--report_freq', type=float, default=50, help='report frequency')
 parser.add_argument('--gpu', type=int, default=0, help='gpu device id')
 parser.add_argument('--epochs', type=int, default=600, help='num of training epochs')
+parser.add_argument('--start_epoch', type=int, default=0, help='num of training epochs')
 parser.add_argument('--init_channels', type=int, default=36, help='num of init channels')
 parser.add_argument('--layers', type=int, default=20, help='total number of layers')
 parser.add_argument('--model_path', type=str, default='saved_models', help='path to save the model')
@@ -71,7 +72,7 @@ def main():
   logging.info("args = %s", args)
 
   genotype = eval("genotypes.%s" % args.arch)
-  model = Network(args.init_channels, CIFAR_CLASSES, args.layers, args.auxiliary, genotype)
+  model = Network(args.init_channels, CIFAR_CLASSES, args.layers, args.auxiliary, genotype, args.residual_wei, args.shrink_channel)
   model = model.cuda()
 
   logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
@@ -85,6 +86,20 @@ def main():
       weight_decay=args.weight_decay
       )
 
+  resume = os.path.join(args.save, 'checkpoint.pth.tar')
+  if os.path.exists(resume):
+    print("=> loading checkpoint %s" % resume)
+    #checkpoint = torch.load(resume)
+    checkpoint = torch.load(resume, map_location = lambda storage, loc: storage.cuda(0))
+    args.start_epoch = checkpoint['epoch']
+    model.load_state_dict(checkpoint['state_dict'])
+    #optimizer.load_state_dict(checkpoint['optimizer'])
+    optimizer.state_dict()['state'] = checkpoint['optimizer']['state']
+    print('=> loaded checkpoint epoch %d' % args.start_epoch)
+    if args.start_epoch >= args.epochs:
+        print('training finished')
+        sys.exit(0)
+
   train_transform, valid_transform = utils._data_transforms_cifar10(args)
   train_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
   valid_data = dset.CIFAR10(root=args.data, train=False, download=True, transform=valid_transform)
@@ -96,8 +111,10 @@ def main():
       valid_data, batch_size=args.batch_size, shuffle=False, pin_memory=True, num_workers=2)
 
   scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, float(args.epochs))
+  for epoch in range(args.start_epoch):
+    scheduler.step()
 
-  for epoch in range(args.epochs):
+  for epoch in range(args.start_epoch, args.epochs):
     scheduler.step()
     logging.info('epoch %d lr %e', epoch, scheduler.get_lr()[0])
     model.drop_path_prob = args.drop_path_prob * epoch / args.epochs
@@ -109,7 +126,13 @@ def main():
         valid_acc, valid_obj = infer(valid_queue, model, criterion)
         logging.info('valid_acc %f', valid_acc)
 
-    utils.save(model, os.path.join(args.save, 'weights.pt'))
+    utils.save_checkpoint({
+      'epoch': epoch + 1,
+      'state_dict': model.state_dict(),
+      'best_acc_top1': train_acc,
+      'optimizer' : optimizer.state_dict(),
+      }, False, args.save)
+
 
 
 def train(train_queue, model, criterion, optimizer):
